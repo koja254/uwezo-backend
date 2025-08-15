@@ -76,7 +76,7 @@ app.post('/webhook', async (req, res) => {
     try {
       await transporter.sendMail({
         from: '"Uwezo Link" <info@uwezolinkinitiative.org>',
-        to: 'tevinxrider@gmail.com',
+        to: 'uwezolinkinitiative@gmail.com',
         subject: `New ${formName} submission`,
         text: JSON.stringify(fields, null, 2),
       });

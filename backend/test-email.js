@@ -17,7 +17,7 @@ async function testEmail() {
   try {
     const info = await transporter.sendMail({
       from: '"Uwezo Link" <info@uwezolinkinitiative.org>',
-      to: 'tevinxrider@gmail.com',
+      to: 'uwezolinkinitiative@gmail.com',
       subject: 'Test Email from Uwezo Link',
       text: 'This is a test email to verify SMTP configuration.',
     });
