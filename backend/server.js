@@ -11,17 +11,21 @@ if (!process.env.ZOHO_PASSWORD) {
 }
 
 const app = express();
-app.use(express.json());
+
+// Enable CORS for specific origins
 app.use(cors({
   origin: [
-    'https://689ca3f54cc438000805af21--gorgeous-seahorse-93fdcc.netlify.app', // No trailing slash
     'http://localhost:5173',
-    'http://localhost:8080'
+    'http://localhost:8080',
+    'https://689f480186be460008be7fff--gorgeous-seahorse-93fdcc.netlify.app',
+    'https://your-custom-domain.com' // Replace with your actual custom domain
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
-  preflightContinue: true
+  credentials: false // Set to true if you need cookies or auth headers
 }));
+
+app.use(express.json());
 
 // Log all requests for debugging
 app.use((req, res, next) => {
@@ -29,18 +33,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Handle CORS preflight requests explicitly
-app.options('/webhook', (req, res) => {
-  console.log('Received OPTIONS preflight request for /webhook');
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.status(204).send();
-});
-
 const transporter = nodemailer.createTransport({
   host: 'smtppro.zoho.com',
-  port: 587, // Changed to 587 for Render compatibility
+  port: 587,
   secure: false,
   auth: {
     user: 'info@uwezolinkinitiative.org',
@@ -81,7 +76,7 @@ app.post('/webhook', async (req, res) => {
         text: JSON.stringify(fields, null, 2),
       });
       console.log(`Email sent for form: ${formName}`);
-      return res.status(200).send('Form submitted successfully');
+      return res.status(200).json({ message: 'Form submitted successfully' });
     } catch (error) {
       attempts++;
       console.error(`Attempt ${attempts} failed for form ${formName}:`, {
@@ -91,11 +86,11 @@ app.post('/webhook', async (req, res) => {
         responseCode: error.responseCode
       });
       if (attempts === maxRetries) {
-        return res.status(500).send(`Error processing form: ${error.message}`);
+        return res.status(500).json({ error: `Error processing form: ${error.message}` });
       }
     }
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000; // Match your logs (port 10000)
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
