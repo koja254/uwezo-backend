@@ -17,7 +17,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'http://localhost:8080',
-    'https://689f480186be460008be7fff--gorgeous-seahorse-93fdcc.netlify.app',
+    'https://689f5551864d460008b8d145--gorgeous-seahorse-93fdcc.netlify.app',
     'https://your-custom-domain.com' // Replace with your actual custom domain
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
