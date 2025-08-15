@@ -17,8 +17,8 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'http://localhost:8080',
-    'https://689f5551864d460008b8d145--gorgeous-seahorse-93fdcc.netlify.app',
-    'https://your-custom-domain.com' // Replace with your actual custom domain
+    'https://689f57bc91ed6f00081b1a97--gorgeous-seahorse-93fdcc.netlify.app',
+    'https://uwezolinkinitiative.org' 
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
