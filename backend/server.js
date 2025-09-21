@@ -15,7 +15,7 @@ if (missingRequired.length) {
   process.exit(1);
 }
 
-// Check Pesapal optional-but-important envs; if missing we'll disable donate endpoints gracefully
+// Pesapal envs (optional — app runs without them, but payments disabled)
 const pesapalEnvVars = ['PESAPAL_BASE_URL', 'PESAPAL_CONSUMER_KEY', 'PESAPAL_CONSUMER_SECRET'];
 const missingPesapal = pesapalEnvVars.filter(k => !process.env[k]);
 const pesapalEnabled = missingPesapal.length === 0;
@@ -31,7 +31,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'http://localhost:8080',
-    'https://68cff80dfb39110008410e75--gorgeous-seahorse-93fdcc.netlify.app',
+    'https://689f57bc91ed6f00081b1a97--gorgeous-seahorse-93fdcc.netlify.app',
     'https://uwezolinkinitiative.org'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -41,7 +41,7 @@ app.use(cors({
 
 app.use(express.json({ limit: '100kb' }));
 
-// Log all requests for debugging (kept minimal)
+// Minimal request logging
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} Origin: ${req.headers.origin || '-'}`);
   next();
@@ -60,7 +60,7 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-transporter.verify((error, success) => {
+transporter.verify((error) => {
   if (error) {
     console.error('SMTP connection error:', error);
   } else {
@@ -68,7 +68,7 @@ transporter.verify((error, success) => {
   }
 });
 
-// Basic health route and webhook route
+// Health & webhook endpoints
 app.get('/', (req, res) => res.status(200).send('Uwezo Link server is running.'));
 app.get('/webhook', (req, res) => {
   console.log('GET /webhook accessed');
@@ -98,7 +98,7 @@ app.post('/webhook', async (req, res) => {
       console.error(`Attempt ${attempts} failed for form ${formName}:`, {
         message: error?.message,
         code: error?.code,
-        response: error?.response?.toString?.() || error?.response,
+        response: error?.response?.data || error?.response?.toString?.() || error?.response,
       });
       if (attempts === maxRetries) {
         return res.status(500).json({ error: `Error processing form: ${error?.message || 'unknown'}` });
@@ -107,86 +107,128 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- Pesapal Integration Helpers ----------
-/**
- * Robust function to request bearer token.
- * Tries JSON first, then urlencoded form as a fallback. Parses common token fields.
- */
-const getBearerToken = async () => {
-  if (!pesapalEnabled) {
-    throw new Error('Pesapal integration disabled: missing environment variables');
+// ----------------------
+// Pesapal helpers
+// ----------------------
+
+// Normalize user-provided PESAPAL_BASE_URL into an object with well-known endpoints.
+// Accepts common variants:
+// - Sandbox/demo: https://cybqa.pesapal.com/pesapalv3
+// - Production:    https://pay.pesapal.com/v3
+// - Sometimes users may set trailing slashes or different subpaths.
+function normalizePesapalBase(rawBase) {
+  if (!rawBase) return null;
+  let base = String(rawBase).trim();
+  // remove trailing slash(es)
+  base = base.replace(/\/+$/, '');
+
+  // Common sandbox pattern contains 'pesapalv3'
+  if (base.includes('pesapalv3')) {
+    // keep as-is: example: https://cybqa.pesapal.com/pesapalv3
+    return {
+      tokenBase: `${base}/api/Auth/RequestToken`,
+      submitOrderBase: `${base}/api/Transactions/SubmitOrderRequest`,
+      statusBase: `${base}/api/Transactions/GetTransactionStatus`
+    };
   }
 
-  const tokenUrl = `${process.env.PESAPAL_BASE_URL.replace(/\/+$/, '')}/api/Auth/RequestToken`;
+  // Common production pattern is pay.pesapal.com/v3
+  if (base.includes('pay.pesapal.com') && base.includes('/v3')) {
+    // example: https://pay.pesapal.com/v3
+    const trimmed = base.replace(/\/+$/, '');
+    return {
+      tokenBase: `${trimmed}/api/Auth/RequestToken`,
+      submitOrderBase: `${trimmed}/api/Transactions/SubmitOrderRequest`,
+      statusBase: `${trimmed}/api/Transactions/GetTransactionStatus`
+    };
+  }
+
+  // If user supplied the older mistaken variant like pay.pesapal.com/pesapalv3, map it to the correct production v3
+  if (base.includes('pay.pesapal.com') && base.includes('pesapalv3')) {
+    const mapped = base.replace('pesapalv3', 'v3');
+    return {
+      tokenBase: `${mapped}/api/Auth/RequestToken`,
+      submitOrderBase: `${mapped}/api/Transactions/SubmitOrderRequest`,
+      statusBase: `${mapped}/api/Transactions/GetTransactionStatus`
+    };
+  }
+
+  // If user supplied a URL that already contains /api/Auth/RequestToken, use as provided
+  if (base.toLowerCase().includes('/api/auth/requesttoken')) {
+    const root = base.replace(/\/api\/auth\/requesttoken.*$/i, '');
+    return {
+      tokenBase: `${root}/api/Auth/RequestToken`,
+      submitOrderBase: `${root}/api/Transactions/SubmitOrderRequest`,
+      statusBase: `${root}/api/Transactions/GetTransactionStatus`
+    };
+  }
+
+  // Last resort: append v3 then endpoints
+  const fallback = base + (base.endsWith('/v3') ? '' : '/v3');
+  return {
+    tokenBase: `${fallback}/api/Auth/RequestToken`,
+    submitOrderBase: `${fallback}/api/Transactions/SubmitOrderRequest`,
+    statusBase: `${fallback}/api/Transactions/GetTransactionStatus`
+  };
+}
+
+const pesapalConfig = pesapalEnabled ? normalizePesapalBase(process.env.PESAPAL_BASE_URL) : null;
+
+// Robust function to get bearer token. Accepts both JSON and form payloads depending on server.
+const getBearerToken = async () => {
+  if (!pesapalEnabled || !pesapalConfig) {
+    throw new Error('Pesapal integration disabled or not configured correctly');
+  }
+
+  const tokenUrl = pesapalConfig.tokenBase;
   console.log('Requesting token from:', tokenUrl);
 
-  const payloadJson = {
+  const payload = {
     consumer_key: process.env.PESAPAL_CONSUMER_KEY,
     consumer_secret: process.env.PESAPAL_CONSUMER_SECRET,
   };
 
-  const axiosConfigBase = {
+  const axiosBase = {
     timeout: 8000,
-    validateStatus: status => status >= 200 && status < 500, // we'll handle non-2xx explicitly
+    validateStatus: s => s >= 200 && s < 500 // handle non-2xx ourselves
   };
 
-  const attempts = [
-    {
-      // Try JSON body first (some endpoints accept JSON)
-      headers: { 'Content-Type': 'application/json' },
-      body: payloadJson,
-      desc: 'json'
-    },
-    {
-      // Fallback to form-urlencoded
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(payloadJson).toString(),
-      desc: 'form-urlencoded'
-    }
+  const strategies = [
+    { desc: 'json', body: payload, headers: { 'Content-Type': 'application/json' } },
+    { desc: 'form', body: new URLSearchParams(payload).toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
   ];
 
   let lastError = null;
-  for (const attempt of attempts) {
+  for (const strat of strategies) {
     try {
-      const response = await axios.post(tokenUrl, attempt.body, { ...axiosConfigBase, headers: attempt.headers });
-      if (response.status >= 200 && response.status < 300) {
-        const data = response.data || {};
-        // Common token fields
+      const resp = await axios.post(tokenUrl, strat.body, { ...axiosBase, headers: strat.headers });
+      if (resp.status >= 200 && resp.status < 300) {
+        const data = resp.data || {};
         const token = data.token || data.access_token || data.accessToken || data.Token || data.result?.token;
         if (token) {
-          console.log(`Obtained Pesapal token (via ${attempt.desc}).`);
+          console.log(`Obtained Pesapal token (via ${strat.desc})`);
           return token;
         } else {
-          // if response is 200 but token not present, surface the full response for debugging
-          const sample = typeof data === 'object' ? JSON.stringify(data) : String(data);
-          throw new Error(`Token not found in response. Body: ${sample}`);
+          throw new Error(`No token field in response body: ${JSON.stringify(data)}`);
         }
       } else {
-        // Non-2xx returned - capture body for debug
-        const status = response.status;
-        const body = response.data;
-        throw new Error(`Non-2xx status ${status}. Body: ${JSON.stringify(body)}`);
+        throw new Error(`Non-2xx status ${resp.status}. Body: ${typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data)}`);
       }
     } catch (err) {
       lastError = err;
-      console.warn(`Pesapal token attempt (${attempt.desc}) failed:`, err.message || err);
-      // try next attempt
+      console.warn(`Pesapal token attempt (${strat.desc}) failed:`, err.message || err);
+      // try next strategy
     }
   }
 
-  // If we get here, all attempts failed
   console.error('Pesapal Token Error after attempts:', lastError && (lastError.stack || lastError.message || lastError));
-  // Provide the caller a helpful error string
-  const readable = lastError?.message || 'unknown error while requesting Pesapal token';
-  throw new Error(`Authentication failed with Pesapal: ${readable}`);
+  throw new Error(`Authentication failed with Pesapal: ${lastError?.message || 'unknown'}`);
 };
 
 const submitOrder = async (orderData) => {
-  if (!pesapalEnabled) throw new Error('Pesapal disabled: cannot submit order');
+  if (!pesapalEnabled || !pesapalConfig) throw new Error('Pesapal disabled: cannot submit order');
 
-  // request token
   const token = await getBearerToken();
-
   const orderId = `DONATE-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const amount = Number(orderData.amount);
 
@@ -216,7 +258,7 @@ const submitOrder = async (orderData) => {
     orderPayload.token_description = `Monthly donation for ${orderData.donor?.email || 'donor'}`;
   }
 
-  const submitUrl = `${process.env.PESAPAL_BASE_URL.replace(/\/+$/, '')}/api/Transactions/SubmitOrderRequest`;
+  const submitUrl = pesapalConfig.submitOrderBase;
   console.log('Submitting order to:', submitUrl);
 
   try {
@@ -233,7 +275,6 @@ const submitOrder = async (orderData) => {
       throw new Error(`Pesapal returned status ${response.status} - ${JSON.stringify(response.data)}`);
     }
 
-    // Expecting redirect_url and order_tracking_id in response.data
     const data = response.data || {};
     return {
       redirectUrl: data.redirect_url || data.redirectUrl || data.redirect || null,
@@ -247,7 +288,10 @@ const submitOrder = async (orderData) => {
   }
 };
 
-// ---------- API endpoints ----------
+// ----------------------
+// API endpoints
+// ----------------------
+
 app.post('/api/donate', async (req, res) => {
   if (!pesapalEnabled) {
     return res.status(503).json({ error: 'Payment system not configured. Contact admin.' });
@@ -266,17 +310,16 @@ app.post('/api/donate', async (req, res) => {
 
     console.log('Donation initiated:', { orderId: result.orderId, email: orderData.donor.email, amount: orderData.amount });
 
-    // Send a thank-you email to donor (best-effort)
+    // Best-effort thank-you email
     try {
       await transporter.sendMail({
         from: '"Uwezo Link" <info@uwezolinkinitiative.org>',
         to: orderData.donor.email,
         subject: `Thank You for Your Donation - Order ${result.orderId}`,
-        text: `Thank you for your ${result.rawResponse?.currency || ''} ${orderData.amount} donation! Order ID: ${result.orderId}. Impact: Your gift supports STEM education in Kenya. A tax receipt will be sent separately if applicable.`,
+        text: `Thank you for your ${result.rawResponse?.currency || ''} ${orderData.amount} donation! Order ID: ${result.orderId}. Impact: Your gift supports STEM education in Kenya.`,
       });
     } catch (emailErr) {
       console.warn('Failed to send donor email:', emailErr && (emailErr.message || emailErr));
-      // Not fatal for the donation flow
     }
 
     return res.json(result);
@@ -292,7 +335,6 @@ app.post('/pesapal/ipn', async (req, res) => {
   }
 
   const { order_tracking_id } = req.body || {};
-
   if (!order_tracking_id) {
     console.log('Invalid IPN: No order_tracking_id');
     return res.status(400).send('Invalid IPN');
@@ -300,7 +342,7 @@ app.post('/pesapal/ipn', async (req, res) => {
 
   try {
     const token = await getBearerToken();
-    const statusUrl = `${process.env.PESAPAL_BASE_URL.replace(/\/+$/, '')}/api/Transactions/GetTransactionStatus?orderTrackingId=${order_tracking_id}`;
+    const statusUrl = `${pesapalConfig.statusBase}?orderTrackingId=${order_tracking_id}`;
     console.log('Getting status from:', statusUrl);
 
     const statusResponse = await axios.get(statusUrl, { headers: { Authorization: `Bearer ${token}` }, timeout: 8000 });
@@ -338,10 +380,8 @@ app.post('/pesapal/ipn', async (req, res) => {
   }
 });
 
-// Fallback 404 handler for unknown routes (keeps Render's message clearer)
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not Found' });
-});
+// Fallback 404 handler
+app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
