@@ -19,7 +19,7 @@ app.use(cors({
     'http://localhost:5173',
     'http://localhost:8080',
     'https://689f57bc91ed6f00081b1a97--gorgeous-seahorse-93fdcc.netlify.app',
-    'https://uwezolinkinitiative.org' 
+    'https://uwezolinkinitiative.org'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
@@ -34,7 +34,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   host: 'smtppro.zoho.com',
   port: 587,
   secure: false,
@@ -100,9 +100,8 @@ const getBearerToken = async () => {
     consumer_secret: process.env.PESAPAL_CONSUMER_SECRET,
   });
 
-  // Fixed URL: Append without extra /api
   const tokenUrl = `${process.env.PESAPAL_BASE_URL}api/Auth/RequestToken`;
-  console.log('Requesting token from:', tokenUrl); // Debug log
+  console.log('Requesting token from:', tokenUrl);
 
   try {
     const response = await axios.post(tokenUrl, authData, {
@@ -117,7 +116,7 @@ const getBearerToken = async () => {
 
 const submitOrder = async (orderData) => {
   const token = await getBearerToken();
-  const orderId = `DONATE-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`; // Unique ID
+  const orderId = `DONATE-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
   const orderPayload = {
     id: orderId,
@@ -125,7 +124,7 @@ const submitOrder = async (orderData) => {
     amount: orderData.amount,
     description: orderData.description,
     callback_url: process.env.PESAPAL_CALLBACK_URL || 'https://www.uwezolinkinitiative.org/donate/success',
-    notification_id: process.env.PESAPAL_IPN_ID || '', // Set after IPN registration
+    notification_id: process.env.PESAPAL_IPN_ID || '',
     branch: 'Uwezo Link Initiative',
     billing_address: {
       email_address: orderData.donor.email,
@@ -133,22 +132,20 @@ const submitOrder = async (orderData) => {
       country_code: orderData.donor.country || 'KE',
       first_name: orderData.donor.firstName,
       last_name: orderData.donor.lastName,
-      line_1: '', // Optional address
+      line_1: '',
       city: 'Nairobi',
       state: 'Nairobi',
       zip: '00100',
     },
   };
 
-  // For monthly/recurring: Enable token saving
   if (orderData.isRecurring) {
     orderPayload.save_token = true;
     orderPayload.token_description = `Monthly donation for ${orderData.donor.email}`;
   }
 
-  // Fixed URL: Append without extra /api
   const submitUrl = `${process.env.PESAPAL_BASE_URL}api/Transactions/SubmitOrderRequest`;
-  console.log('Submitting order to:', submitUrl); // Debug log
+  console.log('Submitting order to:', submitUrl);
 
   try {
     const response = await axios.post(submitUrl, orderPayload, {
@@ -172,7 +169,6 @@ const submitOrder = async (orderData) => {
 app.post('/api/donate', async (req, res) => {
   try {
     const orderData = req.body;
-    // Basic validation
     if (!orderData.amount || orderData.amount < 1) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
@@ -182,10 +178,8 @@ app.post('/api/donate', async (req, res) => {
 
     const result = await submitOrder(orderData);
 
-    // Log donation (optional DB integration later)
     console.log('Donation initiated:', { orderId: result.orderId, email: orderData.donor.email, amount: orderData.amount });
 
-    // Send receipt email via existing webhook (adapt form-name as needed)
     await transporter.sendMail({
       from: '"Uwezo Link" <info@uwezolinkinitiative.org>',
       to: orderData.donor.email,
@@ -193,7 +187,7 @@ app.post('/api/donate', async (req, res) => {
       text: `Thank you for your $${orderData.amount} donation! Order ID: ${result.orderId}. Impact: Your gift supports STEM education in Kenya. A tax receipt will be sent separately if applicable.`,
     });
 
-    res.json(result); // { redirectUrl, orderTrackingId, orderId }
+    res.json(result);
   } catch (error) {
     console.error('Donation API Error:', error);
     res.status(500).json({ error: error.message });
@@ -201,7 +195,7 @@ app.post('/api/donate', async (req, res) => {
 });
 
 app.post('/pesapal/ipn', async (req, res) => {
-  const { order_tracking_id } = req.body; // Pesapal sends this
+  const { order_tracking_id } = req.body;
 
   if (!order_tracking_id) {
     console.log('Invalid IPN: No order_tracking_id');
@@ -210,9 +204,8 @@ app.post('/pesapal/ipn', async (req, res) => {
 
   try {
     const token = await getBearerToken();
-    // Fixed URL for GetTransactionStatus
     const statusUrl = `${process.env.PESAPAL_BASE_URL}api/Transactions/GetTransactionStatus?orderTrackingId=${order_tracking_id}`;
-    console.log('Getting status from:', statusUrl); // Debug log
+    console.log('Getting status from:', statusUrl);
 
     const statusResponse = await axios.get(statusUrl, { headers: { Authorization: `Bearer ${token}` } });
 
@@ -220,7 +213,6 @@ app.post('/pesapal/ipn', async (req, res) => {
     console.log('IPN Received:', { order_tracking_id, status: status.payment_status });
 
     if (status.payment_status === 'COMPLETED') {
-      // Send confirmation email using existing transporter
       await transporter.sendMail({
         from: '"Uwezo Link" <info@uwezolinkinitiative.org>',
         to: status.billing_address?.email_address || 'info@uwezolinkinitiative.org',
@@ -228,22 +220,19 @@ app.post('/pesapal/ipn', async (req, res) => {
         text: `Thank you for your $${status.amount} donation! Order ID: ${order_tracking_id}. Impact: Your gift supports STEM education in Kenya.`,
       });
 
-      // If recurring, log token (optional DB integration later)
       if (status.token?.token_id) {
         console.log('Recurring token saved:', status.token.token_id);
-        // Store token_id for future charges (e.g., in env or DB)
       }
     } else if (status.payment_status === 'FAILED') {
       console.log('Payment failed:', order_tracking_id);
-      // Optional: Notify donor of failure
     }
 
-    res.status(200).send('OK'); // Acknowledge to Pesapal (required!)
+    res.status(200).send('OK');
   } catch (error) {
     console.error('IPN Processing Error:', error);
     res.status(500).send('Error');
   }
 });
 
-const PORT = process.env.PORT || 10000; // Match your logs (port 10000)
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
