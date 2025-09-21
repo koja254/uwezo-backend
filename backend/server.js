@@ -34,7 +34,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   host: 'smtppro.zoho.com',
   port: 587,
   secure: false,
@@ -100,8 +100,12 @@ const getBearerToken = async () => {
     consumer_secret: process.env.PESAPAL_CONSUMER_SECRET,
   });
 
+  // Fixed URL: Append without extra /api
+  const tokenUrl = `${process.env.PESAPAL_BASE_URL}api/Auth/RequestToken`;
+  console.log('Requesting token from:', tokenUrl); // Debug log
+
   try {
-    const response = await axios.post(`${process.env.PESAPAL_BASE_URL}api/Auth/RequestToken`, authData, {
+    const response = await axios.post(tokenUrl, authData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     return response.data.token;
@@ -142,8 +146,12 @@ const submitOrder = async (orderData) => {
     orderPayload.token_description = `Monthly donation for ${orderData.donor.email}`;
   }
 
+  // Fixed URL: Append without extra /api
+  const submitUrl = `${process.env.PESAPAL_BASE_URL}api/Transactions/SubmitOrderRequest`;
+  console.log('Submitting order to:', submitUrl); // Debug log
+
   try {
-    const response = await axios.post(`${process.env.PESAPAL_BASE_URL}api/Transactions/SubmitOrderRequest`, orderPayload, {
+    const response = await axios.post(submitUrl, orderPayload, {
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
@@ -202,10 +210,11 @@ app.post('/pesapal/ipn', async (req, res) => {
 
   try {
     const token = await getBearerToken();
-    const statusResponse = await axios.get(
-      `${process.env.PESAPAL_BASE_URL}api/Transactions/GetTransactionStatus?orderTrackingId=${order_tracking_id}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    // Fixed URL for GetTransactionStatus
+    const statusUrl = `${process.env.PESAPAL_BASE_URL}api/Transactions/GetTransactionStatus?orderTrackingId=${order_tracking_id}`;
+    console.log('Getting status from:', statusUrl); // Debug log
+
+    const statusResponse = await axios.get(statusUrl, { headers: { Authorization: `Bearer ${token}` } });
 
     const status = statusResponse.data;
     console.log('IPN Received:', { order_tracking_id, status: status.payment_status });
