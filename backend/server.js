@@ -13,17 +13,17 @@ const {
   ZOHO_CLIENT_SECRET,
   ZOHO_REFRESH_TOKEN,
   ZOHO_EMAIL,
-  ZOHO_ACCOUNTS_BASE // e.g. https://accounts.zoho.com  (optional)
+  ZOHO_ACCOUNTS_BASE // e.g. https://accounts.zoho.com or https://accounts.zoho.eu
 } = process.env;
 
 if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REFRESH_TOKEN || !ZOHO_EMAIL) {
-  console.error('❌ Missing required env vars. Please set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN and ZOHO_EMAIL in your .env');
+  console.error('❌ Missing required env vars. Please set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN and ZOHO_EMAIL in your env');
   process.exit(1);
 }
 
 const app = express();
 
-// Enable CORS for your allowed origins
+// CORS
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -36,26 +36,31 @@ app.use(cors({
 
 app.use(express.json({ limit: '100kb' }));
 
-// Minimal request logging
+// Logging middleware
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
 
-// --- Zoho OAuth2 / Nodemailer setup ---
-// ACCOUNTS_BASE: region endpoint; default to https://accounts.zoho.com
-const ACCOUNTS_BASE = ZOHO_ACCOUNTS_BASE || 'https://accounts.zoho.com';
+// Helper to derive smtp host from accounts base
+function smtpHostFromAccountsBase(accountsBase) {
+  if (!accountsBase) return 'smtp.zoho.com';
+  const host = accountsBase.replace(/^https?:\/\//, '');
+  if (host.includes('zoho.eu')) return 'smtp.zoho.eu';
+  if (host.includes('zoho.in')) return 'smtp.zoho.in';
+  return 'smtp.zoho.com';
+}
+
+const ACCOUNTS_BASE = (ZOHO_ACCOUNTS_BASE && ZOHO_ACCOUNTS_BASE.replace(/\/$/, '')) || 'https://accounts.zoho.com';
+const SMTP_HOST = smtpHostFromAccountsBase(ACCOUNTS_BASE);
 
 let transporter = null;
 let currentAccess = { token: null, expiresAt: 0, apiDomain: null };
 
-/**
- * Exchange refresh token for access token.
- * Returns token object { access_token, expires_in, api_domain, ... }
- */
+/** Exchange refresh token for access token */
 async function fetchAccessToken() {
   try {
-    const url = `${ACCOUNTS_BASE.replace(/\/$/, '')}/oauth/v2/token`;
+    const url = `${ACCOUNTS_BASE}/oauth/v2/token`;
     const params = new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: ZOHO_CLIENT_ID,
@@ -68,6 +73,8 @@ async function fetchAccessToken() {
       timeout: 10000
     });
 
+    console.log('--- TOKEN DATA ---');
+    console.log(JSON.stringify(resp.data, null, 2));
     return resp.data;
   } catch (err) {
     console.error('Failed to obtain Zoho access token:', err?.response?.data || err.message || err);
@@ -75,17 +82,12 @@ async function fetchAccessToken() {
   }
 }
 
-/**
- * Create or refresh the Nodemailer transporter using XOAUTH2 on STARTTLS (port 587).
- * Many Zoho accounts accept XOAUTH2 on port 587 with STARTTLS.
- */
+/** Create transporter (STARTTLS on 587) with XOAUTH2 (preferred) */
 async function ensureTransporter() {
-  // If transporter exists and token still valid, reuse it
   if (transporter && Date.now() < (currentAccess.expiresAt - 30 * 1000)) {
     return transporter;
   }
 
-  // Obtain fresh access token (and api_domain)
   const tokenData = await fetchAccessToken();
   const accessToken = tokenData.access_token;
   const expiresIn = tokenData.expires_in || 3600;
@@ -95,11 +97,11 @@ async function ensureTransporter() {
   currentAccess.expiresAt = Date.now() + (expiresIn * 1000);
   currentAccess.apiDomain = apiDomain;
 
-  // Create transporter using STARTTLS (port 587) and explicit XOAUTH2
+  // create nodemailer transporter (STARTTLS)
   transporter = nodemailer.createTransport({
-    host: 'smtp.zoho.com',       // try smtp.zoho.eu / smtp.zoho.in if your org is regional
+    host: SMTP_HOST,
     port: 587,
-    secure: false,               // use STARTTLS
+    secure: false,
     requireTLS: true,
     auth: {
       type: 'OAuth2',
@@ -112,25 +114,21 @@ async function ensureTransporter() {
     authMethod: 'XOAUTH2'
   });
 
-  // Verify transporter (non-blocking, helpful to surface errors early)
   try {
     await transporter.verify();
-    console.log('✅ Zoho transporter verified (XOAUTH2 via STARTTLS).');
+    console.log(`✅ SMTP transporter verified (host=${SMTP_HOST})`);
   } catch (err) {
-    console.error('Transporter verify failed:', err);
-    // Keep transporter (we still attempt to send; fallback to API if send fails)
+    // Log full error object for diagnosis but don't crash
+    console.error('Transporter verify failed:', err && err.message ? err.message : err);
+    if (err?.response) console.error('Transporter verify response:', err.response);
   }
 
   return transporter;
 }
 
-/**
- * Send mail using Zoho Mail REST API (fallback if SMTP XOAUTH2 fails).
- * Uses current access token; will call fetchAccessToken() if necessary.
- */
+/** Send via Zoho Mail REST API (fallback) */
 async function sendViaZohoApi({ to, subject, text, html }) {
   try {
-    // Ensure we have a valid access token
     if (!currentAccess.token || Date.now() > (currentAccess.expiresAt - 30 * 1000)) {
       const tokenData = await fetchAccessToken();
       currentAccess.token = tokenData.access_token;
@@ -138,12 +136,11 @@ async function sendViaZohoApi({ to, subject, text, html }) {
       currentAccess.apiDomain = tokenData.api_domain || currentAccess.apiDomain;
     }
 
-    // Determine API base domain (Zoho sometimes returns api_domain like https://www.zohoapis.com)
+    // determine API base (Zoho may return api_domain)
     const apiBase = currentAccess.apiDomain || 'https://www.zohoapis.com';
-    // Mail send endpoint
     const mailUrl = `${apiBase.replace(/\/$/, '')}/mail/v1/messages`;
 
-    // Zoho Mail API expects payload fields; using simple content object
+    // payload - Zoho accepts a 'message' object or simple fields; we'll use the basic supported fields
     const payload = {
       fromAddress: ZOHO_EMAIL,
       toAddress: to,
@@ -159,34 +156,40 @@ async function sendViaZohoApi({ to, subject, text, html }) {
       timeout: 10000
     });
 
+    console.log('Zoho API send response:', resp.data);
     return resp.data;
   } catch (err) {
-    // Bubble up meaningful error
-    console.error('Zoho Mail API send failed:', err?.response?.data || err.message || err);
+    // Log detailed API error
+    console.error('--- API ERROR ---');
+    if (err?.response) {
+      console.error('status:', err.response.status);
+      console.error('data:', JSON.stringify(err.response.data, null, 2));
+    } else {
+      console.error(err.message || err);
+    }
     throw err;
   }
 }
 
-// Background refresh: keep token fresh (refresh early)
+// Background token refresh
 setInterval(async () => {
   try {
     if (!currentAccess.expiresAt || Date.now() > (currentAccess.expiresAt - 60 * 1000)) {
-      console.log('Refreshing Zoho access token (background)...');
+      console.log('Refreshing Zoho access token (background) ...');
       await ensureTransporter();
       console.log('Refreshed Zoho access token (background).');
     }
   } catch (err) {
-    console.error('Error while refreshing Zoho access token:', err?.message || err);
+    console.error('Background refresh error:', err?.message || err);
   }
-}, 30 * 1000); // check every 30s
+}, 30 * 1000);
 
 // Health check
 app.get('/', (req, res) => res.status(200).send('Uwezo Link server is running.'));
 
 // Webhook endpoint
 app.post('/webhook', async (req, res) => {
-  console.log('POST /webhook received:', req.body);
-
+  console.log('POST /webhook received:', JSON.stringify(req.body));
   const { 'form-name': formName, ...fields } = req.body;
 
   const mailOptions = {
@@ -197,7 +200,6 @@ app.post('/webhook', async (req, res) => {
   };
 
   try {
-    // Ensure transporter exists (this will refresh tokens as needed)
     const t = await ensureTransporter();
 
     // Try SMTP send first
@@ -206,10 +208,10 @@ app.post('/webhook', async (req, res) => {
       console.log(`📩 Email sent via SMTP for form: ${formName}`);
       return res.status(200).json({ message: 'Form submitted successfully (SMTP)' });
     } catch (smtpErr) {
-      console.error('SMTP send failed:', smtpErr?.response || smtpErr?.message || smtpErr);
+      console.error('SMTP send failed:', smtpErr && smtpErr.message ? smtpErr.message : smtpErr);
+      if (smtpErr?.response) console.error('SMTP response:', smtpErr.response);
 
-      // If SMTP failed due to auth/XOAUTH2 issues, fallback to Zoho Mail API
-      // We'll attempt API fallback for any SMTP failure to be resilient.
+      // Fallback to API
       try {
         await sendViaZohoApi({
           to: mailOptions.to,
@@ -219,17 +221,17 @@ app.post('/webhook', async (req, res) => {
         console.log(`📩 Email sent via Zoho Mail API for form: ${formName}`);
         return res.status(200).json({ message: 'Form submitted successfully (API fallback)' });
       } catch (apiErr) {
-        console.error('API fallback also failed:', apiErr?.response || apiErr?.message || apiErr);
-        return res.status(500).json({ error: 'Failed to send email via SMTP and API fallback' });
+        console.error('API fallback failed (see API ERROR logs above).');
+        return res.status(500).json({ error: 'Failed to send email' });
       }
     }
-  } catch (error) {
-    console.error('❌ Error sending email (setup):', (error && error.message) || error);
-    res.status(500).json({ error: 'Failed to send email' });
+  } catch (err) {
+    console.error('Error during sending flow:', err?.message || err);
+    return res.status(500).json({ error: 'Failed to send email' });
   }
 });
 
-// Fallback 404
+// 404
 app.use((req, res) => res.status(404).json({ error: 'Not Found' }));
 
 const PORT = process.env.PORT || 10000;
