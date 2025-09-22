@@ -49,7 +49,7 @@ const SMTP_HOST = smtpHostFromAccountsBase(ACCOUNTS_BASE);
 let currentAccess = { token: null, expiresAt: 0, apiDomain: null };
 let smtpTransporter = null;
 
-// fetch access token using refresh token
+/** Exchange refresh token for access token */
 async function fetchAccessToken() {
   const url = `${ACCOUNTS_BASE}/oauth/v2/token`;
   const params = new URLSearchParams({
@@ -69,7 +69,7 @@ async function fetchAccessToken() {
   return resp.data;
 }
 
-// prepare SMTP transporter (optional)
+/** Prepare SMTP transporter (optional fallback) */
 async function prepareSmtpTransporterIfNeeded(accessToken) {
   if (smtpTransporter) return smtpTransporter;
 
@@ -99,7 +99,7 @@ async function prepareSmtpTransporterIfNeeded(accessToken) {
   return smtpTransporter;
 }
 
-// ensure we have a valid access token in state
+/** Ensure we have a valid access token cached */
 async function ensureAccessToken() {
   if (currentAccess.token && Date.now() < (currentAccess.expiresAt - 30 * 1000)) {
     return currentAccess;
@@ -113,32 +113,92 @@ async function ensureAccessToken() {
   return currentAccess;
 }
 
-// send via Zoho Mail REST API (primary)
+/**
+ * sendViaZohoApi:
+ * - discovers the Mail accountId using the Mail /api/accounts endpoint
+ * - posts the message to /api/accounts/{accountId}/messages with the expected payload
+ */
 async function sendViaZohoApi({ to, subject, text }) {
   await ensureAccessToken();
-  const apiBase = currentAccess.apiDomain || 'https://www.zohoapis.com';
-  const url = `${apiBase.replace(/\/$/, '')}/mail/v1/messages`;
 
+  // Derive mail host from apiDomain (prefer mail.zoho.*)
+  const apiDomain = currentAccess.apiDomain || 'https://www.zohoapis.com';
+  let mailHost = 'https://mail.zoho.com';
+  if (apiDomain.includes('.zohoapis.eu') || apiDomain.includes('zoho.eu')) mailHost = 'https://mail.zoho.eu';
+  if (apiDomain.includes('.zohoapis.in') || apiDomain.includes('zoho.in')) mailHost = 'https://mail.zoho.in';
+
+  // 1) Discover accounts
+  let accountId = null;
+  try {
+    const accountsUrl = `${mailHost.replace(/\/$/, '')}/api/accounts`;
+    const accountsResp = await axios.get(accountsUrl, {
+      headers: { Authorization: `Zoho-oauthtoken ${currentAccess.token}` },
+      timeout: 10000
+    });
+
+    console.log('Mail accounts response:', JSON.stringify(accountsResp.data, null, 2));
+    const accounts = accountsResp.data?.data || accountsResp.data?.accounts || accountsResp.data;
+
+    if (Array.isArray(accounts) && accounts.length > 0) {
+      // Try to find a matching account by email
+      const matching = accounts.find(a => {
+        const emailCandidates = [
+          a?.email,
+          a?.account_name,
+          a?.account,
+          a?.accountId,
+          a?.id
+        ].filter(Boolean).map(s => String(s).toLowerCase());
+        return emailCandidates.includes((ZOHO_EMAIL || '').toLowerCase());
+      });
+      const chosen = matching || accounts[0];
+      accountId = chosen?.accountId || chosen?.id || chosen?.account_id || chosen?.account;
+    } else if (accounts && typeof accounts === 'object') {
+      accountId = accounts.accountId || accounts.id || accounts.account_id || accounts.account;
+    }
+  } catch (err) {
+    console.error('Failed to discover Mail accounts:', err?.response?.data || err.message || err);
+    throw new Error('Could not discover Zoho Mail accounts for this token (see logs).');
+  }
+
+  if (!accountId) {
+    console.error('No accountId discovered from Zoho Mail accounts response.');
+    throw new Error('No Zoho Mail accountId discovered for your account.');
+  }
+
+  // 2) Build account-scoped send URL
+  const sendUrl = `${mailHost.replace(/\/$/, '')}/api/accounts/${encodeURIComponent(accountId)}/messages`;
+
+  // 3) Build payload (message object with content array)
   const payload = {
-    fromAddress: ZOHO_EMAIL,
-    toAddress: to,
-    subject,
-    content: text || ''
+    message: {
+      subject,
+      fromAddress: ZOHO_EMAIL,
+      toAddress: to,
+      content: [
+        {
+          type: 'text/plain',
+          value: text || ''
+        }
+      ]
+    }
   };
 
+  // 4) POST the message
   try {
-    const resp = await axios.post(url, payload, {
+    const resp = await axios.post(sendUrl, payload, {
       headers: {
         Authorization: `Zoho-oauthtoken ${currentAccess.token}`,
         'Content-Type': 'application/json'
       },
       timeout: 10000
     });
-    console.log('Zoho API send succeeded:', resp.data);
+
+    console.log('Zoho API send response:', JSON.stringify(resp.data, null, 2));
     return resp.data;
   } catch (err) {
     console.error('--- API SEND ERROR ---');
-    if (err.response) {
+    if (err?.response) {
       console.error('status:', err.response.status);
       console.error('data:', JSON.stringify(err.response.data, null, 2));
     } else {
@@ -148,7 +208,7 @@ async function sendViaZohoApi({ to, subject, text }) {
   }
 }
 
-// send via SMTP (optional fallback)
+/** Send via SMTP fallback (optional) */
 async function sendViaSmtp({ to, subject, text }) {
   await ensureAccessToken();
   await prepareSmtpTransporterIfNeeded(currentAccess.token);
@@ -174,7 +234,7 @@ setInterval(async () => {
   }
 }, 30 * 1000);
 
-// simple health
+// health
 app.get('/', (req, res) => res.status(200).send('Uwezo Link server is running.'));
 
 // webhook
@@ -186,7 +246,7 @@ app.post('/webhook', async (req, res) => {
   const subject = `New ${formName || 'form'} submission`;
   const text = JSON.stringify(fields, null, 2);
 
-  // Primary: use API
+  // API-first
   try {
     await sendViaZohoApi({ to, subject, text });
     console.log('📩 Sent via Zoho API');
